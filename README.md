@@ -394,3 +394,7 @@ use G\FileTransfer\Driver\S3Driver;
 
 $transfer = FileTransfer::create(S3Driver::class, ['bucket' => 'acme-artifacts'], $client);
 ```
+
+## License
+
+MIT, see [LICENSE](LICENSE).
