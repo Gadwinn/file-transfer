@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace G\FileTransfer\Tests\Driver;
 
+use Aws\Api\DateTimeResult;
 use Aws\Command;
 use Aws\CommandInterface;
 use Aws\Exception\AwsException;
@@ -26,6 +27,7 @@ use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\Test;
 use PHPUnit\Framework\MockObject\Stub;
 use PHPUnit\Framework\TestCase;
+use Psr\Http\Message\StreamInterface;
 
 /**
  * Unit coverage for {@see S3Driver}.
@@ -231,13 +233,18 @@ final class S3DriverTest extends TestCase
     public function uploadStreamSendsAPutObjectCarryingTheStreamBody(): void
     {
         $stream = $this->memoryStream();
+        fwrite($stream, 'skipped|payload');
+        fseek($stream, strlen('skipped|'));
         $captured = null;
+        $body = null;
 
         $client = $this->client();
         $client->method('execute')->willReturnCallback($this->router(
-            static function (CommandInterface $command) use (&$captured): ?Result {
+            static function (CommandInterface $command) use (&$captured, &$body): ?Result {
                 if ($command->getName() === 'PutObject') {
                     $captured = $command->toArray();
+                    self::assertInstanceOf(StreamInterface::class, $captured['Body']);
+                    $body = (string) $captured['Body'];
 
                     return new Result([]);
                 }
@@ -250,7 +257,36 @@ final class S3DriverTest extends TestCase
 
         self::assertIsArray($captured);
         self::assertSame('data/payload.bin', $captured['Key']);
-        self::assertSame($stream, $captured['Body']);
+        self::assertSame('payload', $body, 'read from the current position');
+        self::assertIsResource($stream, 'the caller keeps an open stream');
+    }
+
+    #[Test]
+    public function uploadStreamRejectsANonResource(): void
+    {
+        $this->expectException(IOException::class);
+
+        $this->connected($this->client())->uploadStream('not a stream', '/data/payload.bin');
+    }
+
+    #[Test]
+    public function deleteDirectoryRefusesAFile(): void
+    {
+        $client = $this->client();
+        $client->method('doesObjectExist')->willReturn(true);
+        $client->method('execute')->willReturnCallback($this->router(
+            static function (CommandInterface $command): ?Result {
+                if ($command->getName() === 'ListObjectsV2') {
+                    return new Result([]);
+                }
+
+                return null;
+            },
+        ));
+
+        $this->expectException(FileNotFoundException::class);
+
+        $this->connected($client)->deleteDirectory('/file.txt');
     }
 
     #[Test]
@@ -465,7 +501,7 @@ final class S3DriverTest extends TestCase
                         [
                             'Key' => 'uploads/b.bin',
                             'Size' => 2048,
-                            'LastModified' => new DateTimeImmutable('2022-03-04T05:06:07+00:00'),
+                            'LastModified' => new DateTimeResult('2022-03-04T05:06:07+00:00'),
                         ],
                     ],
                     'IsTruncated' => false,

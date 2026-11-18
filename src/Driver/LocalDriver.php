@@ -24,6 +24,7 @@ use function fopen;
 use function implode;
 use function is_dir;
 use function is_file;
+use function is_link;
 use function is_string;
 use function mkdir;
 use function opendir;
@@ -33,7 +34,7 @@ use function realpath;
 use function rmdir;
 use function rtrim;
 use function sprintf;
-use function stat;
+use function lstat;
 use function str_contains;
 use function stream_copy_to_stream;
 use function unlink;
@@ -195,12 +196,16 @@ final class LocalDriver implements UniversalTransferAdapterInterface
             throw new IOException('The root directory itself cannot be removed.');
         }
 
+        if (is_link($path)) {
+            throw new IOException(sprintf('Remote path "%s" is a symbolic link, not a directory.', $remotePath));
+        }
+
         if ($recursive) {
             foreach ($this->listDirectory($remotePath) as $child) {
                 if ($child->isDirectory()) {
                     $this->deleteDirectory($child->getPath(), true);
                 } else {
-                    $this->delete($child->getPath());
+                    $this->removeEntry($child->getPath());
                 }
             }
         }
@@ -261,23 +266,40 @@ final class LocalDriver implements UniversalTransferAdapterInterface
         $path = $this->resolve($remotePath);
         clearstatcache(true, $path);
 
-        $info = @stat($path);
+        // lstat(): a symbolic link is described as itself (neither file nor
+        // directory), so a recursive delete never follows it out of the tree.
+        $info = @lstat($path);
         if ($info === false) {
             throw new IOException(sprintf('Unable to stat remote path "%s".', $remotePath));
         }
 
         $lastModified = (new DateTimeImmutable('@' . $info['mtime']))
             ->setTimezone(new DateTimeZone('UTC'));
+        $isLink = is_link($path);
 
         return new RemoteResource(
             $remotePath,
             $name,
             $info['size'],
             $lastModified,
-            is_dir($path),
-            is_file($path),
+            !$isLink && is_dir($path),
+            !$isLink && is_file($path),
             new Permissions($info['mode'] & self::PERMISSION_MASK),
         );
+    }
+
+    /**
+     * Remove a non-directory entry (file or symbolic link) during a recursive
+     * delete. A link is removed itself; its target is never touched.
+     */
+    private function removeEntry(string $remotePath): void
+    {
+        $path = $this->resolve($remotePath);
+
+        // On Windows a link to a directory is removed with rmdir().
+        if (!@unlink($path) && !(is_link($path) && @rmdir($path))) {
+            throw new IOException(sprintf('Unable to delete remote entry "%s".', $remotePath));
+        }
     }
 
     /**

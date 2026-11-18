@@ -4,10 +4,13 @@ declare(strict_types=1);
 
 namespace G\FileTransfer\Factory;
 
+use ArgumentCountError;
 use G\FileTransfer\Exception\ConfigurationException;
 use G\FileTransfer\UniversalTransferAdapterInterface;
+use TypeError;
 
 use function class_exists;
+use function is_subclass_of;
 use function sprintf;
 
 /**
@@ -44,10 +47,27 @@ final class TransferFactory implements TransferFactoryInterface
             ));
         }
 
-        /** @var T $driver */
-        $driver = $collaborator === null
-            ? new $driverClass($config)
-            : new $driverClass($config, $collaborator);
+        if (!is_subclass_of($driverClass, UniversalTransferAdapterInterface::class)) {
+            throw new ConfigurationException(sprintf(
+                'Transfer driver class "%s" does not implement %s.',
+                $driverClass,
+                UniversalTransferAdapterInterface::class,
+            ));
+        }
+
+        try {
+            /** @var T $driver */
+            $driver = $collaborator === null
+                ? new $driverClass($config)
+                : new $driverClass($config, $collaborator);
+        } catch (ArgumentCountError | TypeError $e) {
+            // Missing or wrong collaborator (clock, S3 client...).
+            throw new ConfigurationException(sprintf(
+                'Transfer driver "%s" could not be built: %s',
+                $driverClass,
+                $e->getMessage(),
+            ), 0, $e);
+        }
 
         return $driver;
     }

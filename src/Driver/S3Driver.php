@@ -8,6 +8,7 @@ use Aws\Exception\AwsException;
 use Aws\ResultInterface;
 use Aws\S3\S3ClientInterface;
 use DateTimeImmutable;
+use DateTimeInterface;
 use DateTimeZone;
 use G\FileTransfer\Exception\ConfigurationException;
 use G\FileTransfer\Exception\ConnectionException;
@@ -18,8 +19,10 @@ use G\FileTransfer\ValueObject\Permissions;
 use G\FileTransfer\ValueObject\RemoteResource;
 use G\FileTransfer\ValueObject\RemoteResourceInterface;
 use Generator;
+use GuzzleHttp\Psr7\LimitStream;
 use GuzzleHttp\Psr7\Utils;
 use Psr\Http\Message\StreamInterface;
+use RuntimeException;
 
 use function is_array;
 use function is_file;
@@ -172,11 +175,26 @@ final class S3Driver implements UniversalTransferAdapterInterface
     {
         $this->requireConnection();
 
-        $this->runCommand(self::CMD_PUT_OBJECT, [
-            self::PARAM_BUCKET => $this->bucket,
-            self::PARAM_KEY => $this->keyFor($remotePath),
-            self::PARAM_BODY => $sourceStream,
-        ]);
+        if (!is_resource($sourceStream)) {
+            throw new IOException('The upload source must be an open, readable stream resource.');
+        }
+
+        // The SDK would wrap a raw resource in a stream that closes it once
+        // destroyed: wrap it here, start at the current position, and detach
+        // afterwards so the caller keeps an open stream.
+        $source = Utils::streamFor($sourceStream);
+        $position = $source->isSeekable() ? $source->tell() : 0;
+        $body = $position > 0 ? new LimitStream($source, -1, $position) : $source;
+
+        try {
+            $this->runCommand(self::CMD_PUT_OBJECT, [
+                self::PARAM_BUCKET => $this->bucket,
+                self::PARAM_KEY => $this->keyFor($remotePath),
+                self::PARAM_BODY => $body,
+            ]);
+        } finally {
+            $source->detach();
+        }
     }
 
     public function downloadToFile(string $remotePath, string $localPath): void
@@ -219,8 +237,13 @@ final class S3Driver implements UniversalTransferAdapterInterface
         // Wrap the caller's resource only to copy into it, then detach so the
         // wrapper's destructor never closes a stream the caller still owns.
         $destination = Utils::streamFor($targetStream);
-        Utils::copyToStream($body, $destination);
-        $destination->detach();
+        try {
+            Utils::copyToStream($body, $destination);
+        } catch (RuntimeException $e) {
+            throw new IOException(sprintf('Unable to write "%s" into the target stream.', $remotePath), 0, $e);
+        } finally {
+            $destination->detach();
+        }
     }
 
     public function delete(string $remotePath): void
@@ -252,7 +275,8 @@ final class S3Driver implements UniversalTransferAdapterInterface
     {
         $this->requireConnection();
 
-        if (!$this->exists($remotePath)) {
+        // A directory is a key prefix: a file at this exact key is not one.
+        if (!$this->prefixExists($this->directoryKey($remotePath))) {
             throw new FileNotFoundException(sprintf('Remote directory "%s" does not exist.', $remotePath));
         }
 
@@ -401,7 +425,8 @@ final class S3Driver implements UniversalTransferAdapterInterface
     {
         try {
             return $this->client->execute($this->client->getCommand($name, $args));
-        } catch (AwsException $e) {
+        } catch (RuntimeException $e) {
+            // AwsException, and the stream errors of SourceFile / SaveAs.
             throw new IOException(
                 sprintf('S3 "%s" operation failed: %s', $name, $this->reason($e)),
                 0,
@@ -490,8 +515,9 @@ final class S3Driver implements UniversalTransferAdapterInterface
 
     private function toUtc(mixed $value): DateTimeImmutable
     {
-        if ($value instanceof DateTimeImmutable) {
-            return $value->setTimezone(new DateTimeZone(self::UTC));
+        // The SDK returns Aws\Api\DateTimeResult, a mutable \DateTime.
+        if ($value instanceof DateTimeInterface) {
+            return DateTimeImmutable::createFromInterface($value)->setTimezone(new DateTimeZone(self::UTC));
         }
 
         return new DateTimeImmutable(self::UNKNOWN_EPOCH);
@@ -529,9 +555,10 @@ final class S3Driver implements UniversalTransferAdapterInterface
         return $position === false ? $trimmed : substr($trimmed, $position + 1);
     }
 
-    private function reason(AwsException $exception): string
+    private function reason(RuntimeException $exception): string
     {
-        return $exception->getAwsErrorMessage() ?? $exception->getMessage();
+        return ($exception instanceof AwsException ? $exception->getAwsErrorMessage() : null)
+            ?? $exception->getMessage();
     }
 
     private function requireConnection(): S3ClientInterface
