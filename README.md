@@ -63,7 +63,7 @@ Switching transport later is a one-token change — `SftpDriver::class` → `Ftp
 | `privateKey` | `string` | Path to the private key file (use **with** `publicKey`). |
 | `publicKey` | `string` | Path to the public key file. |
 | `passphrase` | `string` | Passphrase protecting the private key. |
-| `fingerprint` | `string` | Expected host MD5 fingerprint (hex). Verified on connect; mismatch aborts. |
+| `fingerprint` | `string` | Expected host key fingerprint in hex: MD5 (32 digits) or SHA-1 (40 digits), colons optional. Verified on connect; mismatch aborts. **Without it the server's identity is not checked**: set it in production. |
 
 Provide **either** `password`, **or both** `privateKey` and `publicKey`. Malformed wiring throws a `ConfigurationExceptionInterface` at construction time.
 
@@ -113,6 +113,7 @@ if ($transfer->exists('/remote/releases/current')) {
 
 // Non-empty directories require explicit recursion
 $transfer->deleteDirectory('/remote/releases/old', recursive: true);
+// Symbolic links met on the way are removed, never followed.
 ```
 
 ### 5. Listing — lazy, strongly typed
@@ -203,7 +204,7 @@ Any transport — FTP, FTPS, S3, WebDAV — becomes a drop-in by implementing `U
 
 ## FTP and FTPS
 
-The bundled `FtpDriver` speaks plain FTP and explicit FTPS through PHP's native `ext-ftp` extension. It always negotiates **passive mode** after login (for NAT/firewall compatibility), maps every `ftp_*` fault onto the unified exception boundary, and anchors listing timestamps to **UTC** via an injected `Psr\Clock\ClockInterface`.
+The bundled `FtpDriver` speaks plain FTP and explicit FTPS through PHP's native `ext-ftp` extension. It always negotiates **passive mode** after login (for NAT/firewall compatibility), maps every `ftp_*` fault onto the unified exception boundary, and anchors listing timestamps to **UTC** via an injected `Psr\Clock\ClockInterface`. Directories are listed with `MLSD` (RFC 3659) when the server supports it, otherwise from the Unix `ls -l` format.
 
 Enable the extension:
 
@@ -314,7 +315,7 @@ $transfer->disconnect();
 |---|---|---|---|
 | `root` | `string` | yes | Existing directory that holds the files |
 
-Every remote path is resolved **inside the root**: `/invoices/a.pdf`, `invoices/a.pdf` and `invoices\a.pdf` are the same file, and a path trying to climb out of the root (`../`) throws an `IOException`. Symbolic links located inside the root are followed as the operating system does. As with the other drivers, parent directories are not created implicitly.
+Every remote path is resolved **inside the root**: `/invoices/a.pdf`, `invoices/a.pdf` and `invoices\a.pdf` are the same file, and a path trying to climb out of the root (`../`) throws an `IOException`. Symbolic links located inside the root are followed for reads and writes; a recursive delete removes the links themselves and never what they point to, and `deleteDirectory()` refuses a link. As with the other drivers, parent directories are not created implicitly.
 
 ## Amazon S3 (and S3-compatible)
 

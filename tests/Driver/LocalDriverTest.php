@@ -237,6 +237,31 @@ final class LocalDriverTest extends TestCase
         self::assertFalse($this->driver->exists('/docs'));
     }
 
+    public function testRecursiveDeleteRemovesSymbolicLinksWithoutFollowingThem(): void
+    {
+        file_put_contents($this->outside . DIRECTORY_SEPARATOR . 'keep.txt', 'keep');
+        $this->driver->createDirectory('/docs');
+        $this->symlinkOrSkip($this->outside, $this->root . DIRECTORY_SEPARATOR . 'docs' . DIRECTORY_SEPARATOR . 'link');
+
+        $entries = iterator_to_array($this->driver->listDirectory('/docs'), false);
+        self::assertCount(1, $entries);
+        self::assertFalse($entries[0]->isDirectory(), 'a link is not reported as a directory');
+
+        $this->driver->deleteDirectory('/docs', true);
+
+        self::assertFalse($this->driver->exists('/docs'));
+        self::assertFileExists($this->outside . DIRECTORY_SEPARATOR . 'keep.txt');
+    }
+
+    public function testDeleteDirectoryRefusesASymbolicLink(): void
+    {
+        $this->symlinkOrSkip($this->outside, $this->root . DIRECTORY_SEPARATOR . 'link');
+
+        $this->expectException(IOException::class);
+
+        $this->driver->deleteDirectory('/link', true);
+    }
+
     public function testDeleteDirectoryFailsWhenMissing(): void
     {
         $this->expectException(FileNotFoundException::class);
@@ -357,8 +382,22 @@ final class LocalDriverTest extends TestCase
         return $stream;
     }
 
+    private function symlinkOrSkip(string $target, string $link): void
+    {
+        if (!@symlink($target, $link)) {
+            self::markTestSkipped('Symbolic links cannot be created here (Windows without the privilege).');
+        }
+    }
+
     private function remove(string $path): void
     {
+        if (is_link($path)) {
+            // Remove the link itself, never what it points to.
+            @unlink($path) || @rmdir($path);
+
+            return;
+        }
+
         if (is_dir($path)) {
             foreach (scandir($path) ?: [] as $entry) {
                 if ($entry !== '.' && $entry !== '..') {

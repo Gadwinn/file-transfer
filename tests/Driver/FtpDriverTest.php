@@ -297,6 +297,50 @@ final class FtpDriverTest extends TestCase
     }
 
     #[Test]
+    public function itStripsTheTargetFromASymbolicLinkName(): void
+    {
+        $resource = $this->parseLine('lrwxrwxrwx   1 owner group       11 Jan 15  2021 current -> releases/42');
+
+        self::assertInstanceOf(RemoteResourceInterface::class, $resource);
+        self::assertSame('current', $resource->getName());
+        self::assertSame('/remote/current', $resource->getPath());
+        self::assertFalse($resource->isDirectory());
+        self::assertFalse($resource->isFile());
+    }
+
+    #[Test]
+    public function itParsesAnMlsdEntry(): void
+    {
+        $resource = $this->parseFacts([
+            'name' => 'report.pdf',
+            'type' => 'file',
+            'size' => '2048',
+            'modify' => '20240315103045.123',
+            'UNIX.mode' => '0640',
+        ]);
+
+        self::assertInstanceOf(RemoteResourceInterface::class, $resource);
+        self::assertSame('/remote/report.pdf', $resource->getPath());
+        self::assertSame(2048, $resource->getSize());
+        self::assertTrue($resource->isFile());
+        self::assertSame('0640', $resource->getPermissions()->toString());
+        self::assertSame('2024-03-15 10:30:45', $resource->getLastModified()->format('Y-m-d H:i:s'));
+        self::assertSame('UTC', $resource->getLastModified()->getTimezone()->getName());
+    }
+
+    #[Test]
+    public function itParsesAnMlsdDirectoryAndSkipsTheSelfEntries(): void
+    {
+        $directory = $this->parseFacts(['name' => 'logs', 'Type' => 'DIR', 'modify' => '20240101000000']);
+
+        self::assertInstanceOf(RemoteResourceInterface::class, $directory);
+        self::assertTrue($directory->isDirectory());
+        self::assertSame('0000', $directory->getPermissions()->toString());
+        self::assertNull($this->parseFacts(['name' => '.', 'type' => 'cdir']));
+        self::assertNull($this->parseFacts(['name' => '..', 'type' => 'pdir']));
+    }
+
+    #[Test]
     public function itsExceptionsShareTheUnifiedBoundary(): void
     {
         $configError = new ConfigurationException('x');
@@ -321,6 +365,19 @@ final class FtpDriverTest extends TestCase
 
         /** @var RemoteResourceInterface|null $resource */
         $resource = $method->invoke($this->driver(), $line, '/remote');
+
+        return $resource;
+    }
+
+    /**
+     * @param array<string, string> $facts
+     */
+    private function parseFacts(array $facts): ?RemoteResourceInterface
+    {
+        $method = new ReflectionMethod(FtpDriver::class, 'describeFacts');
+
+        /** @var RemoteResourceInterface|null $resource */
+        $resource = $method->invoke($this->driver(), $facts, '/remote');
 
         return $resource;
     }

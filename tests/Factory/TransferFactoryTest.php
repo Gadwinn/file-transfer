@@ -81,4 +81,24 @@ final class TransferFactoryTest extends TestCase
         /** @phpstan-ignore-next-line — intentionally passing an unknown class */
         (new TransferFactory())->create('G\\FileTransfer\\Driver\\NonExistentDriver', self::VALID_CONFIG);
     }
+
+    #[Test]
+    public function itRejectsAClassThatIsNotADriver(): void
+    {
+        $this->expectException(ConfigurationException::class);
+        $this->expectExceptionMessage('does not implement');
+
+        /** @phpstan-ignore-next-line — intentionally passing a class that is not a driver */
+        (new TransferFactory())->create(\ArrayObject::class, self::VALID_CONFIG);
+    }
+
+    #[Test]
+    public function itReportsAMissingCollaboratorAsAConfigurationError(): void
+    {
+        $this->expectException(ConfigurationException::class);
+        $this->expectExceptionMessage('could not be built');
+
+        // FtpDriver needs a clock as its second argument.
+        (new TransferFactory())->create(FtpDriver::class, self::VALID_CONFIG);
+    }
 }

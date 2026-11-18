@@ -27,6 +27,7 @@ use function hash_equals;
 use function is_file;
 use function is_int;
 use function is_string;
+use function lstat;
 use function mkdir;
 use function opendir;
 use function readdir;
@@ -43,6 +44,7 @@ use function stat;
 use function str_replace;
 use function str_starts_with;
 use function stream_copy_to_stream;
+use function strlen;
 use function strtoupper;
 use function unlink;
 
@@ -64,7 +66,9 @@ use function unlink;
  *  - `privateKey`  (string, optional) — path to the private key file
  *  - `publicKey`   (string, optional) — path to the public key file
  *  - `passphrase`  (string, optional) — passphrase protecting the private key
- *  - `fingerprint` (string, optional) — expected host MD5 fingerprint (hex)
+ *  - `fingerprint` (string, optional) — expected host key fingerprint, hex
+ *                    (MD5, or SHA-1 when 40 digits long; colons ignored).
+ *                    Without it the host key is NOT verified.
  *
  * Provide either `password`, or both `privateKey` and `publicKey`.
  */
@@ -76,6 +80,9 @@ final class SftpDriver implements UniversalTransferAdapterInterface
     private const TYPE_MASK = 0o170000;
     private const TYPE_DIRECTORY = 0o040000;
     private const TYPE_FILE = 0o100000;
+    private const TYPE_LINK = 0o120000;
+
+    private const SHA1_HEX_LENGTH = 40;
 
     private const CURRENT_DIR = '.';
     private const PARENT_DIR = '..';
@@ -163,12 +170,18 @@ final class SftpDriver implements UniversalTransferAdapterInterface
             throw new ConnectionException(sprintf('Unable to reach SFTP host "%s:%d".', $this->host, $this->port));
         }
 
-        $this->verifyFingerprint($session);
-        $this->authenticate($session);
+        try {
+            $this->verifyFingerprint($session);
+            $this->authenticate($session);
 
-        $sftp = @ssh2_sftp($session);
-        if ($sftp === false) {
-            throw new ConnectionException('Unable to initialise the SFTP subsystem on the established session.');
+            $sftp = @ssh2_sftp($session);
+            if ($sftp === false) {
+                throw new ConnectionException('Unable to initialise the SFTP subsystem on the established session.');
+            }
+        } catch (ConnectionException | ConfigurationException $e) {
+            @ssh2_disconnect($session);
+
+            throw $e;
         }
 
         $this->session = $session;
@@ -283,12 +296,18 @@ final class SftpDriver implements UniversalTransferAdapterInterface
             throw new FileNotFoundException(sprintf('Remote directory "%s" does not exist.', $remotePath));
         }
 
+        $info = @lstat($this->url($remotePath));
+        if ($info !== false && ($info['mode'] & self::TYPE_MASK) === self::TYPE_LINK) {
+            throw new IOException(sprintf('Remote path "%s" is a symbolic link, not a directory.', $remotePath));
+        }
+
         if ($recursive) {
             foreach ($this->listDirectory($remotePath) as $child) {
                 if ($child->isDirectory()) {
                     $this->deleteDirectory($child->getPath(), true);
-                } else {
-                    $this->delete($child->getPath());
+                } elseif (!@unlink($this->url($child->getPath()))) {
+                    // Files and symbolic links alike: a link is removed, never followed.
+                    throw new IOException(sprintf('Unable to delete remote entry "%s".', $child->getPath()));
                 }
             }
         }
@@ -343,7 +362,9 @@ final class SftpDriver implements UniversalTransferAdapterInterface
      */
     private function describe(string $remotePath, string $name): RemoteResourceInterface
     {
-        $info = @stat($this->url($remotePath));
+        // lstat(): a symbolic link is described as itself (neither file nor
+        // directory), so a recursive delete never follows it out of the tree.
+        $info = @lstat($this->url($remotePath));
         if ($info === false) {
             throw new IOException(sprintf('Unable to stat remote path "%s".', $remotePath));
         }
@@ -374,16 +395,16 @@ final class SftpDriver implements UniversalTransferAdapterInterface
             return;
         }
 
-        $actual = ssh2_fingerprint($session);
+        // The expected value selects the hash: 40 hex digits = SHA-1, otherwise MD5.
+        $expected = $this->canonicalFingerprint($this->fingerprint);
+        $hash = strlen($expected) === self::SHA1_HEX_LENGTH ? SSH2_FINGERPRINT_SHA1 : SSH2_FINGERPRINT_MD5;
+        $actual = @ssh2_fingerprint($session, $hash | SSH2_FINGERPRINT_HEX);
         if ($actual === false) {
             throw new ConnectionException('Unable to read the remote host key fingerprint.');
         }
 
         if (
-            !hash_equals(
-                $this->canonicalFingerprint($this->fingerprint),
-                $this->canonicalFingerprint($actual)
-            )
+            !hash_equals($expected, $this->canonicalFingerprint($actual))
         ) {
             throw new ConnectionException('Remote host fingerprint mismatch; aborting connection for safety.');
         }

@@ -18,6 +18,7 @@ use G\FileTransfer\ValueObject\RemoteResourceInterface;
 use Generator;
 use Psr\Clock\ClockInterface;
 
+use function array_change_key_case;
 use function extension_loaded;
 use function ftp_chdir;
 use function ftp_close;
@@ -28,6 +29,7 @@ use function ftp_fput;
 use function ftp_get;
 use function ftp_login;
 use function ftp_mkdir;
+use function ftp_mlsd;
 use function ftp_pasv;
 use function ftp_put;
 use function ftp_pwd;
@@ -40,15 +42,20 @@ use function in_array;
 use function is_bool;
 use function is_file;
 use function is_int;
+use function is_numeric;
 use function is_string;
 use function preg_match;
 use function preg_replace;
 use function rtrim;
+use function octdec;
 use function sprintf;
 use function str_contains;
 use function str_split;
 use function str_starts_with;
 use function strlen;
+use function strpos;
+use function strtolower;
+use function substr;
 use function trim;
 
 use const FTP_BINARY;
@@ -89,12 +96,28 @@ final class FtpDriver implements UniversalTransferAdapterInterface
 
     private const TYPE_DIRECTORY = 'd';
     private const TYPE_FILE = '-';
+    private const TYPE_LINK = 'l';
+    private const LINK_ARROW = ' -> ';
+
+    private const MLSD_NAME = 'name';
+    private const MLSD_TYPE = 'type';
+    private const MLSD_SIZE = 'size';
+    private const MLSD_MODIFY = 'modify';
+    private const MLSD_UNIX_MODE = 'unix.mode';
+    private const MLSD_TYPE_FILE = 'file';
+    private const MLSD_TYPE_DIRECTORY = 'dir';
+    /** @var list<string> MLSD entries describing the listed directory itself or its parent. */
+    private const MLSD_SELF_TYPES = ['cdir', 'pdir'];
+    private const MLSD_TIME_FORMAT = '!YmdHis';
+    private const MLSD_TIME_LENGTH = 14;
+    private const MLSD_MODE_PATTERN = '/^[0-7]{3,4}$/';
+    private const MODE_MASK = 0o7777;
 
     private const UTC = 'UTC';
     private const FORMAT_YEAR = 'Y';
     private const TIME_SEPARATOR = ':';
-    private const LISTING_DATETIME_FORMAT = 'M j H:i Y';
-    private const LISTING_DATE_FORMAT = 'M j Y H:i';
+    private const LISTING_DATETIME_FORMAT = '!M j H:i Y';
+    private const LISTING_DATE_FORMAT = '!M j Y H:i';
     private const MIDNIGHT_SUFFIX = ' 00:00';
     private const ONE_YEAR_EARLIER = '-1 year';
     private const WHITESPACE_PATTERN = '/\s+/';
@@ -330,8 +353,9 @@ final class FtpDriver implements UniversalTransferAdapterInterface
             foreach ($this->listDirectory($remotePath) as $child) {
                 if ($child->isDirectory()) {
                     $this->deleteDirectory($child->getPath(), true);
-                } else {
-                    $this->delete($child->getPath());
+                } elseif (@ftp_delete($connection, $this->normalize($child->getPath())) === false) {
+                    // Files and symbolic links alike: a link is removed, never followed.
+                    throw new IOException(sprintf('Unable to delete remote entry "%s".', $child->getPath()));
                 }
             }
         }
@@ -382,6 +406,20 @@ final class FtpDriver implements UniversalTransferAdapterInterface
         $path = $this->normalize($remotePath);
         $base = rtrim($path, '/');
 
+        // MLSD (RFC 3659) is machine-readable and server-independent; the Unix
+        // "ls -l" listing is only the fallback for servers that lack it.
+        $facts = @ftp_mlsd($connection, $path);
+        if ($facts !== false) {
+            foreach ($facts as $fact) {
+                $resource = $this->describeFacts($fact, $base);
+                if ($resource !== null) {
+                    yield $resource;
+                }
+            }
+
+            return;
+        }
+
         $lines = @ftp_rawlist($connection, $path);
         if ($lines === false) {
             throw new IOException(sprintf('Unable to list remote directory "%s".', $remotePath));
@@ -412,11 +450,19 @@ final class FtpDriver implements UniversalTransferAdapterInterface
         }
 
         $name = $matches['name'];
+        $type = $matches['type'];
+
+        // A link is listed as "name -> target".
+        if ($type === self::TYPE_LINK) {
+            $arrow = strpos($name, self::LINK_ARROW);
+            if ($arrow !== false) {
+                $name = substr($name, 0, $arrow);
+            }
+        }
+
         if ($name === self::CURRENT_DIR || $name === self::PARENT_DIR) {
             return null;
         }
-
-        $type = $matches['type'];
 
         return new RemoteResource(
             $basePath . '/' . $name,
@@ -427,6 +473,55 @@ final class FtpDriver implements UniversalTransferAdapterInterface
             $type === self::TYPE_FILE,
             $this->permissionsFromSymbolic($matches['perms']),
         );
+    }
+
+    /**
+     * Build a resource from one MLSD entry (fact names are case-insensitive).
+     *
+     * Returns null for the entries describing the directory itself or its parent.
+     *
+     * @param array<array-key, mixed> $fact
+     */
+    private function describeFacts(array $fact, string $basePath): ?RemoteResourceInterface
+    {
+        $facts = array_change_key_case($fact);
+        $name = $facts[self::MLSD_NAME] ?? null;
+        $rawType = $facts[self::MLSD_TYPE] ?? null;
+        $type = is_string($rawType) ? strtolower($rawType) : '';
+
+        if (
+            !is_string($name) || $name === '' || $name === self::CURRENT_DIR || $name === self::PARENT_DIR
+            || in_array($type, self::MLSD_SELF_TYPES, true)
+        ) {
+            return null;
+        }
+
+        $size = $facts[self::MLSD_SIZE] ?? null;
+        $mode = $facts[self::MLSD_UNIX_MODE] ?? null;
+
+        return new RemoteResource(
+            $basePath . '/' . $name,
+            $name,
+            is_numeric($size) ? (int) $size : 0,
+            $this->parseFactTime($facts[self::MLSD_MODIFY] ?? null),
+            $type === self::MLSD_TYPE_DIRECTORY,
+            $type === self::MLSD_TYPE_FILE,
+            is_string($mode) && preg_match(self::MLSD_MODE_PATTERN, $mode) === 1
+                ? new Permissions(((int) octdec($mode)) & self::MODE_MASK)
+                : Permissions::none(),
+        );
+    }
+
+    /**
+     * Parse an MLSD "modify" fact (YYYYMMDDHHMMSS[.sss], always UTC).
+     */
+    private function parseFactTime(mixed $value): DateTimeImmutable
+    {
+        $utc = new DateTimeZone(self::UTC);
+        $time = is_string($value) ? substr($value, 0, self::MLSD_TIME_LENGTH) : '';
+        $parsed = DateTimeImmutable::createFromFormat(self::MLSD_TIME_FORMAT, $time, $utc);
+
+        return $parsed === false ? $this->clock->now()->setTimezone($utc) : $parsed;
     }
 
     /**
