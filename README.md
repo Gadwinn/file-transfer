@@ -175,7 +175,7 @@ use G\FileTransfer\Driver\SftpDriver;
 $driver = (new TransferFactory())->create(SftpDriver::class, $config); // statically typed as SftpDriver
 ```
 
-For dependency-injection containers or test doubles, swap the factory the facade uses. Drivers that need richer wiring (an injected clock, logger, or DI-managed collaborators) are constructed by your own `TransferFactoryInterface`:
+The facade holds no state. For dependency-injection containers or test doubles, depend on `TransferFactoryInterface` and inject `TransferFactory` or your own implementation. Drivers that need richer wiring (an injected clock, logger, or DI-managed collaborators) are constructed by your own `TransferFactoryInterface`:
 
 ```php
 use G\FileTransfer\FileTransfer;
@@ -194,8 +194,8 @@ final class ContainerTransferFactory implements TransferFactoryInterface
     }
 }
 
-FileTransfer::setFactory(new ContainerTransferFactory());
-// ... FileTransfer::setFactory(null); restores the default factory
+// register ContainerTransferFactory under TransferFactoryInterface, then:
+$transfer = $transferFactory->create(SftpDriver::class, $config);
 ```
 
 ### Writing another driver
