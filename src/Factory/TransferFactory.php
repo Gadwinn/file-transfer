@@ -19,8 +19,8 @@ use function sprintf;
  * The driver class must accept its connection settings as a single
  * `array<string, mixed> $config` constructor argument. Drivers needing
  * richer wiring (injected clock, logger, DI-managed dependencies) should
- * provide a custom {@see TransferFactoryInterface} via
- * {@see \G\FileTransfer\FileTransfer::setFactory()}.
+ * provide a custom {@see TransferFactoryInterface}, injected where
+ * drivers are created.
  *
  * @template T of UniversalTransferAdapterInterface
  * @implements TransferFactoryInterface<T>
