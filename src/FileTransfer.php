@@ -31,16 +31,12 @@ use G\FileTransfer\Factory\TransferFactoryInterface;
  * $transfer->disconnect();
  * ```
  *
- * A custom factory can be injected (e.g. in tests or DI containers):
- * ```php
- * FileTransfer::setFactory(new MyCustomFactory());
- * ```
+ * The facade holds no state. To swap the factory (DI container, test double),
+ * depend on {@see TransferFactoryInterface} and inject {@see TransferFactory} or
+ * your own implementation instead of calling the facade.
  */
 final class FileTransfer
 {
-    /** @var TransferFactoryInterface<UniversalTransferAdapterInterface>|null */
-    private static ?TransferFactoryInterface $factory = null;
-
     /**
      * Prevent direct instantiation.
      *
@@ -48,20 +44,6 @@ final class FileTransfer
      */
     private function __construct()
     {
-    }
-
-    /**
-     * Override the default {@see TransferFactory} with a custom implementation.
-     *
-     * Useful for dependency injection or test doubles.
-     * Pass null to restore the default factory.
-     *
-     * @param TransferFactoryInterface<UniversalTransferAdapterInterface>|null $factory
-     *        Custom factory, or null to reset.
-     */
-    public static function setFactory(?TransferFactoryInterface $factory): void
-    {
-        self::$factory = $factory;
     }
 
     /**
@@ -92,6 +74,6 @@ final class FileTransfer
         array $config = [],
         mixed $collaborator = null,
     ): UniversalTransferAdapterInterface {
-        return (self::$factory ?? new TransferFactory())->create($driverClass, $config, $collaborator);
+        return (new TransferFactory())->create($driverClass, $config, $collaborator);
     }
 }
